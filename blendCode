@@ -1,0 +1,275 @@
+#Imports
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def onclick(event):
+    #Lets you display the image
+    global x_click, y_click
+    x_click, y_click = event.xdata, event.ydata
+    plt.close()
+    
+
+def get_click_coordinates(gray_image):
+    #Gets back the x and y coordinate of the clicked position
+    plt.imshow(gray_image, cmap='gray')
+    cid = plt.connect('button_press_event', onclick)
+    plt.show()
+    plt.disconnect(cid)
+    
+    x = int(x_click)
+    y = int(y_click)
+
+    return (x, y)
+
+def create_sourcemask(cutting_size, greyScaleSource, center_x_source, center_y_source):
+    #Gets us the sourcemask
+    w, h = np.shape(greyScaleSource)
+    placeholder = np.zeros((w,h))
+    x_startSource, x_endSource = center_x_source - cutting_size//2, center_x_source + cutting_size//2
+    y_startSource, y_endSource = center_y_source - cutting_size//2, center_y_source + cutting_size//2
+    #Adds in 1s in the spot we are cutting from so when multiplied only gets us that bit
+    placeholder[y_startSource:y_endSource, x_startSource:x_endSource] = 1
+    sourcemask = placeholder
+
+    return sourcemask
+
+def create_targetmask(cutting_size, greyScaleTarget, center_x_target, center_y_target):
+    #Creates teh target mask
+    a, b = np.shape(greyScaleTarget)
+    placeholder = np.ones((a,b))
+    x_startTarget, x_endTarget = center_x_target - cutting_size//2, center_x_target + cutting_size//2
+    y_startTarget, y_endTarget = center_y_target - cutting_size//2, center_y_target + cutting_size//2
+    #Reverse of previous and getting rid of space the user has clicked in on by making it all zero
+    placeholder[y_startTarget:y_endTarget, x_startTarget:x_endTarget] = 0
+    targetmask = placeholder  
+
+    return targetmask
+
+def upsample(image, img_prev):
+    #upsamples the list
+    upsample = np.zeros((image.shape[0]*2, image.shape[1]*2))
+    for i in range(len(image)):
+        for j in range(len(image[i])):
+            upsample[2*i][2*j] = image[i][j]
+    for i in range((len(image)-1)):
+        for j in range((len(image[0]-1))):
+            upsample[2 * i + 1][2*j] = upsample[2 * i][2 * j]
+    for i in range(len(upsample) -1):
+        for j in range(len(upsample[0]) -1):
+            if(j%2 == 1):
+                upsample[i][j] = (upsample[i][j-1] + upsample[i][j+1])/2
+    #if the prior image has an odd index and the subsample and upsample changes that delete an element to get them the same size
+    if img_prev.shape[1] % 2 == 1:
+        upsample = np.delete(upsample, img_prev.shape[1]-1, 1)
+    if img_prev.shape[0] % 2 == 1:
+        upsample = np.delete(upsample, img_prev.shape[0]-1, 0)
+    return upsample
+
+def gaussian(image):
+    #The kernel 
+    gausfilt = np.array([[1, 4, 7, 4, 1,],[4, 16, 26, 16, 4],[7, 26, 41, 26, 7],[4, 16, 26, 16, 4],[1, 4, 7, 4, 1,]])/ 273.0
+    width, height = image.shape
+    
+    row, col = gausfilt.shape
+    result = np.zeros((width + row, height + col)) #Makes the array we need
+
+    #Multiplies the kernel by each subsectioned image array
+    for r in range(row):
+        for c in range(col):
+            result[r: width + r, c: height + c] += gausfilt[r,c] * image
+    return result[2: width + 2, 2: height + 2] #Edit the array to handle the edge cases
+
+def subsampling_image(image):
+    #Returns half the intial array
+    new_img = (image[::2, ::2])
+    
+    return new_img
+
+def greyScale(data):
+    #Makes the array
+    initialGreyScaleSource = np.zeros((len(data),len(data[0])))
+    
+    #Changes every pixel into a greyscale value
+    for i in range(len(data)):
+        for j in range(len(data[i])):
+            initialGreyScaleSource[i][j] = 0.2989 * data[i][j][0] + 0.5870 * data[i][j][1] + 0.1140 * data[i][j][2]
+    return initialGreyScaleSource
+
+def create_subsample_list(greyScale, pyramid):
+    subsampleList = []
+    subsampleList.append(greyScale)
+    
+    #Makes the subsample we will need for the laplacians
+    for x in range(pyramid):
+        appendedItem = np.zeros((len(subsampleList[x]), len(subsampleList[x][0]))) 
+        appendedItem = gaussian(subsampleList[x])
+        appendedItem = subsampling_image(appendedItem)
+        subsampleList.append(appendedItem)
+    
+    return subsampleList
+
+def create_upsample_list(subsampleList):
+    upsampleList = []
+
+    #Makes the upsamples we will need for the laplacians
+    for i in range(1, len(subsampleList)):
+        upsampled = upsample(subsampleList[i], subsampleList[i-1])
+        upsampled = gaussian(upsampled)
+        upsampleList.append(upsampled)
+    return upsampleList
+
+
+def create_laplacian_list(subsampleList, upsampleList, pyramid):
+    laplacianList = []
+    
+    #The list of the laplacaians by substracting the subsample and upsampled images
+    for i in range(pyramid):
+        laplacianList.append(subsampleList[i] - upsampleList[i])
+    return laplacianList
+
+def valid_cutsize(greyScaleSource, greyScaleTarget):
+    center_x_source, center_y_source = get_click_coordinates(greyScaleSource)  # returns (x, y) where the user clicked the mouse on the gray-scale image.
+    center_x_target, center_y_target = get_click_coordinates(greyScaleTarget)  # returns (x, y) where the user clicked the mouse on the gray-scale image.
+
+    S_height = len(greyScaleSource)
+    S_width = len(greyScaleSource[0])
+    T_height = len(greyScaleTarget)
+    T_width = len(greyScaleTarget[0])
+
+    IMG_heights = [T_height, S_height]
+    IMG_widths = [T_width, S_width]
+    y_cordinate = [center_y_source, center_y_target]
+    x_cordinate = [center_x_source, center_x_target]
+
+    y = min(y_cordinate)
+    x = min(x_cordinate)
+    H = min(IMG_heights)
+    W = min(IMG_widths)
+    h = T_height - center_y_target
+    w = T_width - center_x_target
+    h2 = S_height - center_y_source
+    w2 = S_width - center_x_source
+    cord_list = [y, x, h, w, h2, w2]
+    cut_max = min(cord_list)
+
+    cutting_size = int(input("Enter the size to cut from the source image (must be at least 10): "))
+
+    #Will let us keep inputting it without exiting the code
+    while cutting_size < 10 or cutting_size > cut_max or cutting_size > H or cutting_size > W:
+        print("Invalid cutting size. Re-enter a valid cutting size")
+        cutting_size = int(input("Enter the size to cut from the source image (must be at least 10): "))
+
+    return cutting_size, center_x_source, center_y_source, center_x_target, center_y_target
+
+def main():
+#STEP 1
+    #check if it's a valid image name for source file
+    while True:
+        sourceFile = input("Enter a source file: ")
+        try:
+            plt.imread(sourceFile)
+            break
+        except:
+            print("Invalid image file")
+    #check if it's a valid image name for target file
+    while True:
+        targetFile = input("Enter a target file: ")
+        try:
+            #Checks to make sure the target file is not smaller than the source file
+            if(plt.imread(targetFile).shape[0] * plt.imread(targetFile).shape[1] < plt.imread(sourceFile).shape[0] * plt.imread(sourceFile).shape[1]):
+                print("Invalid image file, smaller than the source")
+            else:
+                plt.imread(targetFile)
+                break
+        except:
+            print("Invalid image file")
+    
+#STEP 2, validate that the pyramid level is within 1 and 9
+    while 0<1:
+        pyramidLevel = int(input("Enter the number of pyramid levels for smoothing (must be 1-9): "))
+        if pyramidLevel <=0 or pyramidLevel > 9:
+            print ("Invalid level amount. Re-enter a valid number")
+        else:
+            break
+
+#STEP 3, convert the data into arrays and get information to use for later code
+    data = plt.imread(sourceFile) #returns a 3D array
+    targetData= plt.imread(targetFile)
+
+    #GreyScale the images
+    greyScaleSource = greyScale(data)
+    greyScaleTarget = greyScale(targetData)
+
+    #Get parameters from the valid_cutsize function, and makes sure the inputter cutsize is valid for the placement of the image
+    cuttingSize,center_x_source, center_y_source, center_x_target, center_y_target = valid_cutsize(greyScaleSource, greyScaleTarget)
+    
+    #Create a lists to use later for source and target images
+    subsampleListSource = create_subsample_list(greyScaleSource, pyramidLevel)
+    upsampleListSource = create_upsample_list(subsampleListSource)
+    laplacianSource = create_laplacian_list(subsampleListSource, upsampleListSource, pyramidLevel)
+
+    subsampleListTarget = create_subsample_list(greyScaleTarget, pyramidLevel)
+    upsampleListTarget = create_upsample_list(subsampleListTarget)
+    laplacianTarget = create_laplacian_list(subsampleListTarget, upsampleListTarget, pyramidLevel)
+    
+    #Gets us the source mask every time
+    sourcemask = create_sourcemask(cuttingSize, greyScaleSource, center_x_source, center_y_source)
+    targetmask = create_targetmask(cuttingSize, greyScaleTarget, center_x_target, center_y_target)
+    
+    #Combined laps is the combined laplacian, greylaps is the combined image at the end and stored in a list just to make the code easier
+    combinedlaps = []
+    combinedgreyimages = 0
+    
+    #Declare a new variable so that we can edit the size without touching the cuttingSize at all
+    size = cuttingSize
+    
+#STEP 4, iterates through the pyramid levels to get the combined laplacian list
+    for i in range(pyramidLevel):
+
+        #Multiplies the laplacians with the masks
+        sourceMaskLaplacian = np.multiply(gaussian(sourcemask), laplacianSource[i])
+        targetMaskLaplacian = np.multiply(gaussian(targetmask), laplacianTarget[i])
+
+        greyMaskSourceLaplacian = np.multiply(gaussian(sourcemask), upsampleListSource[i])
+        greyMaskTargetLaplacian = np.multiply(gaussian(targetmask), upsampleListTarget[i])
+        
+        #The for loop pretty much starts at the top left of the box the source is supposed to go in and fills in the points by
+        #iterating through
+        for x in range(size):
+            for y in range(size):
+                targetMaskLaplacian[center_y_target - size//2 + y][center_x_target - size//2 + x] = sourceMaskLaplacian[center_y_source - size//2 + y][center_x_source- size//2 + x] 
+                #This gets us the sum of the last two subsampled times their masks which starts off the filtering function
+                if(i == pyramidLevel - 1):
+                    greyMaskSourceLaplacian = np.multiply(gaussian(sourcemask), upsampleListSource[i])
+                    greyMaskTargetLaplacian = np.multiply(gaussian(targetmask), upsampleListTarget[i])
+                    greyMaskTargetLaplacian[center_y_target - size//2 + y][center_x_target - size//2 + x] = greyMaskSourceLaplacian[center_y_source - size//2 + y][center_x_source- size//2 + x] 
+                    combinedgreyimages = greyMaskTargetLaplacian
+        center_x_target = center_x_target // 2
+        center_y_target = center_y_target // 2
+
+        center_x_source = center_x_source// 2
+        center_y_source = center_y_source // 2
+        size = size // 2
+        combinedlaps.append(targetMaskLaplacian)
+        sourcemask = subsampling_image(sourcemask)
+        targetmask = subsampling_image(targetmask)  
+
+#STEP 5, combining the images and returning a result based off of the pyramid levels
+    #The first image
+    combinedImage = combinedgreyimages + combinedlaps[pyramidLevel - 1]
+    
+    #When there is more than one pyramid level
+    if(pyramidLevel>1):
+        #Will upsample and then filter the images as many times as needed
+        for i in range(1, pyramidLevel):
+            combinedImage = upsample(combinedImage, combinedlaps[pyramidLevel - (i+1)])
+            combinedImage = gaussian(combinedImage)
+            combinedImage = combinedImage + combinedlaps[pyramidLevel - (i+1)]
+    
+#STEP 6, Displays the image
+    plt.imshow(combinedImage, cmap = "grey")
+    plt.show()
+    
+if __name__ == '__main__':
+    main()
